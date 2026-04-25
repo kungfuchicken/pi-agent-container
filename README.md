@@ -19,11 +19,11 @@ PAC manages version-pinned builds, weekly auto-updates, and rollback so the pac-
 make bump
 
 # 2. Symlink the CLI tools to your PATH
-ln -sf "$(pwd)/pi-container" ~/.local/bin/pi-container
+ln -sf "$(pwd)/pi-agent-container" ~/.local/bin/pi-agent-container
 ln -sf "$(pwd)/pi-build" ~/.local/bin/pi-build
 
 # 3. Run pi against a project
-pi-container dev --workspace ~/code/my-project
+pi-agent-container dev --workspace ~/code/my-project
 ```
 
 ## Usage
@@ -32,14 +32,14 @@ pi-container dev --workspace ~/code/my-project
 
 ```bash
 # Full development mode (default)
-pi-container
-pi-container dev --workspace ~/code/my-project
+pi-agent-container
+pi-agent-container dev --workspace ~/code/my-project
 
 # Read-only safe mode
-pi-container safe --workspace ~/code/my-project
+pi-agent-container safe --workspace ~/code/my-project
 
 # Pass extra flags to pi
-pi-container dev -- --model sonnet:high
+pi-agent-container dev -- --model sonnet:high
 ```
 
 ### Modes
@@ -54,12 +54,12 @@ pi-container dev -- --model sonnet:high
 The `pi-build` script handles the pac-man lifecycle: eat the latest dot, keep a power pellet or two in reserve.
 
 ```bash
-pi-container bump               # Build latest version
-pi-container bump 0.69.0        # Build a specific version
-pi-container rollback            # Restore previous build
-pi-container rollback v0.69.0-20260420T1800  # Restore specific build
-pi-container list                # Show available builds
-pi-container status              # Compare active vs latest on npm
+pi-agent-container bump               # Build latest version
+pi-agent-container bump 0.69.0        # Build a specific version
+pi-agent-container rollback            # Restore previous build
+pi-agent-container rollback v0.69.0-20260420T1800  # Restore specific build
+pi-agent-container list                # Show available builds
+pi-agent-container status              # Compare active vs latest on npm
 ```
 
 Or equivalently via make:
@@ -82,6 +82,61 @@ make uninstall-schedule    # Unload and remove
 
 Logs: `/tmp/pi-build.log` and `/tmp/pi-build.err`
 
+## Skills
+
+PAC includes a set of general-purpose Claude Code skills for planning, implementation, code review, and workflow management.
+
+| Skill                  | Purpose                                                |
+| ---------------------- | ------------------------------------------------------ |
+| `planning`             | Collaborative design planning through dialogue         |
+| `impl-planning`        | Create implementation plans from approved design plans |
+| `implement`            | Begin implementation from an approved plan             |
+| `stage`                | List plans and advance through lifecycle stages        |
+| `worktree-merge`       | Merge work from a git worktree back to main            |
+| `github-issue`         | Generate properly formatted GitHub Issues              |
+| `gemini-code-review`   | Request a code review from Gemini                      |
+| `gemini-design-review` | Request a design plan review from Gemini               |
+| `gemini-impl-review`   | Request an implementation plan review from Gemini      |
+| `gemini-merge-review`  | Request a pre-merge review from Gemini                 |
+| `ra`                   | Run rust-analyzer CLI commands for Rust code analysis  |
+
+Skills live in `skills/` with shared support files in `skills/_shared/`.
+
+## Extensions
+
+Pi extensions vendored as source in `extensions/`. All extensions follow a single model: source files checked into the repo.
+
+From [HazAT/pi-config](https://github.com/HazAT/pi-config):
+- **answer** — `/answer` command + `Ctrl+.` shortcut; extracts questions from assistant responses into interactive Q&A
+- **cost** — `/cost` command; displays API expenditure summaries by date, project, and model
+- **execute-command** — Tool enabling agents to self-invoke slash commands programmatically
+- **todos** — `/todos` command; file-based task management with interactive TUI
+
+From [xRyul/pi-show-diffs](https://github.com/xRyul/pi-show-diffs):
+- **show-diffs** — Diff approval viewer before edit and write tools change files
+
+From [maria-rcks/pi-github](https://github.com/maria-rcks/pi-github):
+- **github** — GitHub integration; issues, PRs, and thread management
+
+From [badlogic/pi-doom](https://github.com/badlogic/pi-doom):
+- **doom** — `/doom` command; play DOOM in your terminal
+
+From [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff):
+- **btw** — Background subagent sessions with TUI management
+- **context** — `/context` command; shows loaded extensions, skills, context files, and token usage
+- **control** — Inter-session communication via Unix domain sockets
+- **files** — `/files` and `/diff` commands; browse git tree with quick actions
+- **go-to-bed** — Prompts for confirmation during quiet hours (midnight–6 AM)
+- **notify** — Desktop notifications when the agent finishes and awaits input
+- **session-breakdown** — `/session-breakdown` command; usage analytics across sessions
+- **split-fork** — Fork a session into a new Ghostty split pane
+- **uv** — Redirects Python tooling (pip, poetry) to uv equivalents
+- **whimsical** — Whimsical loading messages ("Schlepping...", "Combobulating...")
+
+## Working Directory
+
+PAC mounts your host `~working/plans/` and `~working/reports/` directories into the container at `/workspace/~working/`, so skills that reference plan and report files work inside the container. The `WORKING_DIR` variable controls the host path (defaults to `../../` relative to this repo, assuming it lives at `~working/apps/pi-agent-container/`).
+
 ## How It Works
 
 ### Image Tagging
@@ -102,17 +157,18 @@ Host auth tokens (`~/.pi/agent/auth.json`) are bind-mounted read-only into the c
 
 Set these in your shell or in a `.env` file alongside `docker-compose.yml`:
 
-| Variable            | Purpose              |
-| ------------------- | -------------------- |
-| `ANTHROPIC_API_KEY` | Anthropic API access |
-| `OPENAI_API_KEY`    | OpenAI API access    |
-| `GOOGLE_API_KEY`    | Google API access    |
+| Variable            | Purpose                                      |
+| ------------------- | -------------------------------------------- |
+| `ANTHROPIC_API_KEY` | Anthropic API access                         |
+| `OPENAI_API_KEY`    | OpenAI API access                            |
+| `GOOGLE_API_KEY`    | Google API access                            |
+| `WORKING_DIR`       | Host path to `~working/` (plans and reports) |
 
 ### Lima Considerations
 
 This setup uses `lima nerdctl` rather than Docker. A few things to note:
 
-- Environment variables from the macOS host are not automatically forwarded into the Lima VM. The `pi-container` script and Makefile write a `.env` file that compose reads.
+- Environment variables from the macOS host are not automatically forwarded into the Lima VM. The `pi-agent-container` script and Makefile write a `.env` file that compose reads.
 - The `HOST_HOME` variable bridges the macOS `$HOME` path into compose, since `$HOME` inside Lima resolves to the Linux home directory.
 - The `pi-build` script includes an `ensure_lima()` function that starts the Lima VM if it isn't running (useful for the scheduled Friday build).
 
@@ -120,7 +176,7 @@ This setup uses `lima nerdctl` rather than Docker. A few things to note:
 
 | File                          | Purpose                                                                          |
 | ----------------------------- | -------------------------------------------------------------------------------- |
-| `pi-container`                | CLI wrapper for running pi (symlink to `~/.local/bin/`)                          |
+| `pi-agent-container`          | CLI wrapper for running pi (symlink to `~/.local/bin/`)                          |
 | `pi-build`                    | CLI for building, rolling back, and managing images (symlink to `~/.local/bin/`) |
 | `docker-compose.yml`          | Compose config with `dev` and `safe` profiles                                    |
 | `Dockerfile`                  | Builds the pi-coding-agent image with a pinned version                           |
@@ -128,6 +184,9 @@ This setup uses `lima nerdctl` rather than Docker. A few things to note:
 | `com.pi-build.plist.template` | Launchd template for weekly scheduled builds                                     |
 | `.pi-version`                 | Tracks the active pi-coding-agent version (generated, gitignored)                |
 | `.env`                        | Compose environment bridge for Lima (generated, gitignored)                      |
+| `skills/`                     | Claude Code skills for planning, review, and workflow                            |
+| `skills/_shared/`             | Shared support files referenced by multiple skills                               |
+| `extensions/`                 | Pi extensions vendored as source                                                 |
 
 ## License
 

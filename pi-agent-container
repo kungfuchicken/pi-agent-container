@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+IMAGE_NAME="pi-coding-agent"
+
+print_help() {
+  cat <<'EOF'
+pi-agent-container - run pi inside Docker via the pi-agent-container compose app
+
+Usage:
+  pi-agent-container [dev|safe] [--workspace PATH] [-- PI_ARGS...]
+  pi-agent-container bump [VERSION]    Build latest (or specified) pi-coding-agent image
+  pi-agent-container rollback [TAG]    Restore a previous build as active
+  pi-agent-container list              Show available builds
+  pi-agent-container status            Compare active vs latest on npm
+
+Modes:
+  dev   Full development mode (read/write/edit/bash). Default.
+  safe  Read-only mode (read/grep/find/ls only).
+
+Options:
+  --workspace PATH   Host path mounted at /workspace (default: current directory)
+  -h, --help         Show this help
+
+Examples:
+  pi-agent-container
+  pi-agent-container safe
+  pi-agent-container dev --workspace ~/code/my-project
+  pi-agent-container dev -- --model sonnet:high
+  pi-agent-container bump
+  pi-agent-container rollback
+EOF
+}
+
+mode="dev"
+workspace="$PWD"
+
+if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
+  print_help
+  exit 0
+fi
+
+# Passthrough to pi-build for build management subcommands
+case "${1:-}" in
+  bump|rollback|list|status|prune)
+    exec "$APP_DIR/pi-build" "$@"
+    ;;
+esac
+
+if [[ ${1:-} == "dev" || ${1:-} == "safe" ]]; then
+  mode="$1"
+  shift
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workspace)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --workspace requires a path" >&2
+        exit 1
+      fi
+      workspace="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -h|--help)
+      print_help
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+case "$mode" in
+  dev)
+    profile="full-dev"
+    service="pi-full-dev"
+    ;;
+  safe)
+    profile="safe"
+    service="pi-safe"
+    ;;
+  *)
+    echo "error: mode must be 'dev' or 'safe'" >&2
+    exit 1
+    ;;
+esac
+
+# Remaining args are forwarded to pi as PI_ARGS.
+pi_args="$*"
+
+# Resolve workspace to absolute path for consistency.
+if [[ ! -d "$workspace" ]]; then
+  echo "error: workspace does not exist: $workspace" >&2
+  exit 1
+fi
+workspace="$(cd "$workspace" && pwd)"
+
+# Ensure the active image exists before attempting to run
+if ! lima nerdctl image inspect "${IMAGE_NAME}:active" &>/dev/null; then
+  echo "error: no active pi-coding-agent image found." >&2
+  echo "Run 'pi-build bump' to build the initial image." >&2
+  exit 1
+fi
+
+cd "$APP_DIR"
+
+# Write HOST_HOME to .env so compose can read it. Lima doesn't forward arbitrary
+# env vars into the VM, but compose auto-reads .env from the working directory.
+# HOST_HOME is needed because $HOME inside Lima resolves to the Linux home.
+printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nHOST_PAC_DIR=%s\nPI_ARGS=%s\n' "$HOME" "$workspace" "${WORKING_DIR:-$APP_DIR/../..}" "$APP_DIR" "$pi_args" > .env
+
+lima nerdctl compose --profile "$profile" run --rm "$service"

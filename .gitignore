@@ -1,3 +1,11 @@
 .env
 .pi-version
 com.pi-build.plist
+
+# Extension build artifacts
+node_modules/
+dist/
+*.tgz
+*.log
+npm-debug.log*
+.DS_Store

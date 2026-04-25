@@ -1,0 +1,38 @@
+{
+  "name": "pi-doom",
+  "version": "0.1.2",
+  "description": "Play DOOM in your terminal with pi",
+  "author": "Mario Zechner",
+  "license": "GPL-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/badlogic/pi-doom.git"
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "doom",
+    "terminal",
+    "game"
+  ],
+  "files": [
+    "src",
+    "doom/build",
+    "doom1.wad"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "video": "https://sink.mariozechner.at/api/share/f90ba774c4f13b0274bd5655dcb44922/file/doom.mp4"
+  },
+  "scripts": {
+    "build:doom": "./doom/build.sh",
+    "start": "npx tsx src/standalone.ts"
+  },
+  "dependencies": {
+    "@mariozechner/pi-tui": "^0.37.8"
+  }
+}

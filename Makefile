@@ -50,7 +50,7 @@ help:
 
 # Write .env before compose — lima doesn't forward env vars into the VM.
 .env: FORCE
-	@printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nPI_ARGS=%s\n' "$(HOST_HOME)" "$(WORKSPACE_DIR)" "$(WORKING_DIR)" "$(PI_ARGS)" > .env
+	@printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nHOST_PAC_DIR=%s\nPI_ARGS=%s\n' "$(HOST_HOME)" "$(WORKSPACE_DIR)" "$(WORKING_DIR)" "$(abspath .)" "$(PI_ARGS)" > .env
 
 dev: .env
 	lima nerdctl compose --profile full-dev run --rm pi-full-dev
