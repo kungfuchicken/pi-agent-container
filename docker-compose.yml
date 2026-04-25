@@ -27,6 +27,8 @@ services:
       - ${WORKSPACE_DIR:-./}:/workspace
       - pi-agent-data:/home/node/.pi/agent
       - ${HOST_HOME}/.pi/agent/auth.json:/home/node/.pi/agent/auth.json:ro
+      - ${WORKING_DIR}/plans:/workspace/~working/plans
+      - ${WORKING_DIR}/reports:/workspace/~working/reports
     security_opt:
       - no-new-privileges:true
 
@@ -50,6 +52,8 @@ services:
       - ${WORKSPACE_DIR:-./}:/workspace:ro
       - pi-agent-data:/home/node/.pi/agent
       - ${HOST_HOME}/.pi/agent/auth.json:/home/node/.pi/agent/auth.json:ro
+      - ${WORKING_DIR}/plans:/workspace/~working/plans:ro
+      - ${WORKING_DIR}/reports:/workspace/~working/reports:ro
 
 volumes:
   pi-agent-data:

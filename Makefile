@@ -8,9 +8,14 @@ PI_ARGS ?=
 # to the Linux home, breaking host bind mounts like auth.json.
 HOST_HOME ?= $(HOME)
 
+# WORKING_DIR: host path to ~working/ (plans and reports).
+# Default assumes this repo lives at ~working/apps/pi-agent-container/.
+WORKING_DIR ?= $(abspath ../..)
+
 export WORKSPACE_DIR
 export PI_ARGS
 export HOST_HOME
+export WORKING_DIR
 
 PLIST_TEMPLATE := com.pi-build.plist.template
 PLIST_GENERATED := com.pi-build.plist
@@ -45,7 +50,7 @@ help:
 
 # Write .env before compose — lima doesn't forward env vars into the VM.
 .env: FORCE
-	@printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nPI_ARGS=%s\n' "$(HOST_HOME)" "$(WORKSPACE_DIR)" "$(PI_ARGS)" > .env
+	@printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nPI_ARGS=%s\n' "$(HOST_HOME)" "$(WORKSPACE_DIR)" "$(WORKING_DIR)" "$(PI_ARGS)" > .env
 
 dev: .env
 	lima nerdctl compose --profile full-dev run --rm pi-full-dev
@@ -89,3 +94,4 @@ config:
 	@echo "WORKSPACE_DIR=$(WORKSPACE_DIR)"
 	@echo "PI_ARGS=$(PI_ARGS)"
 	@echo "HOST_HOME=$(HOST_HOME)"
+	@echo "WORKING_DIR=$(WORKING_DIR)"

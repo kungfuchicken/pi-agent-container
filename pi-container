@@ -116,6 +116,6 @@ cd "$APP_DIR"
 # Write HOST_HOME to .env so compose can read it. Lima doesn't forward arbitrary
 # env vars into the VM, but compose auto-reads .env from the working directory.
 # HOST_HOME is needed because $HOME inside Lima resolves to the Linux home.
-printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nPI_ARGS=%s\n' "$HOME" "$workspace" "$pi_args" > .env
+printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nPI_ARGS=%s\n' "$HOME" "$workspace" "${WORKING_DIR:-$APP_DIR/../..}" "$pi_args" > .env
 
 lima nerdctl compose --profile "$profile" run --rm "$service"
