@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+IMAGE_NAME="pi-coding-agent"
+KEEP_BUILDS=5
+VERSION_FILE="${APP_DIR}/.pi-version"
+
+# --- helpers ---
+
+log()  { printf '%s [pi-build] %s\n' "$(date +%H:%M:%S)" "$*"; }
+die()  { log "ERROR: $*" >&2; exit 1; }
+
+ensure_lima() {
+  if ! lima nerdctl info &>/dev/null; then
+    log "Lima VM not running. Attempting to start..."
+    limactl start default --tty=false 2>/dev/null \
+      || die "Could not start Lima VM. Start it manually: limactl start"
+    for i in {1..10}; do
+      lima nerdctl info &>/dev/null && break
+      sleep 3
+    done
+    lima nerdctl info &>/dev/null || die "Lima started but nerdctl not responding"
+    log "Lima VM started."
+  fi
+}
+
+latest_npm_version() {
+  npm view @mariozechner/pi-coding-agent version 2>/dev/null \
+    || die "Could not fetch latest version from npm"
+}
+
+current_active_version() {
+  if [[ -f "$VERSION_FILE" ]]; then
+    cat "$VERSION_FILE"
+  else
+    echo "none"
+  fi
+}
+
+# Parse version from a tag like "pi-coding-agent:v0.70.2-20260424T2100"
+version_from_tag() {
+  local tag="$1"
+  # Strip image name prefix, leading 'v', and timestamp suffix
+  echo "$tag" | sed 's/.*:v//; s/-[0-9]\{8\}T[0-9]\{4\}$//'
+}
+
+list_builds() {
+  lima nerdctl images --format '{{.Repository}}:{{.Tag}}' \
+    | grep "^${IMAGE_NAME}:v" \
+    | sort -t: -k2 -rV
+}
+
+# --- commands ---
+
+cmd_bump() {
+  local target_version="${1:-}"
+
+  ensure_lima
+
+  if [[ -z "$target_version" ]]; then
+    target_version="$(latest_npm_version)"
+    log "Latest npm version: $target_version"
+  fi
+
+  local timestamp
+  timestamp="$(date -u +%Y%m%dT%H%M)"
+  local full_tag="v${target_version}-${timestamp}"
+
+  # Check if we already have this exact version as active
+  local current
+  current="$(current_active_version)"
+  if [[ "$current" == "$target_version" && "${FORCE:-}" != "1" ]]; then
+    log "Already running $target_version. Use FORCE=1 to rebuild. Skipping."
+    exit 0
+  fi
+
+  log "Building ${IMAGE_NAME}:${full_tag} ..."
+  lima nerdctl build \
+    --build-arg "PI_VERSION=${target_version}" \
+    -t "${IMAGE_NAME}:${full_tag}" \
+    "$APP_DIR"
+
+  log "Build succeeded. Swapping active tag..."
+
+  # Save current active as prev (if it exists)
+  if lima nerdctl image inspect "${IMAGE_NAME}:active" &>/dev/null; then
+    lima nerdctl tag "${IMAGE_NAME}:active" "${IMAGE_NAME}:prev"
+  fi
+
+  # Atomic swap: tag new build as active
+  lima nerdctl tag "${IMAGE_NAME}:${full_tag}" "${IMAGE_NAME}:active"
+
+  # Record the active version locally
+  echo "$target_version" > "$VERSION_FILE"
+
+  log "Active image is now ${IMAGE_NAME}:${full_tag}"
+
+  cmd_prune
+}
+
+cmd_rollback() {
+  local target="${1:-prev}"
+
+  ensure_lima
+
+  if ! lima nerdctl image inspect "${IMAGE_NAME}:${target}" &>/dev/null; then
+    die "No image found for tag '${target}'. Use 'pi-build list' to see available builds."
+  fi
+
+  # Save current active as prev before overwriting
+  if lima nerdctl image inspect "${IMAGE_NAME}:active" &>/dev/null; then
+    lima nerdctl tag "${IMAGE_NAME}:active" "${IMAGE_NAME}:prev"
+  fi
+
+  lima nerdctl tag "${IMAGE_NAME}:${target}" "${IMAGE_NAME}:active"
+
+  # Update .pi-version from the tag name
+  local ver
+  ver="$(version_from_tag "${IMAGE_NAME}:${target}")"
+  if [[ -n "$ver" ]]; then
+    echo "$ver" > "$VERSION_FILE"
+  fi
+
+  log "Rolled back. Active is now ${target} (pi-coding-agent@${ver:-unknown})"
+}
+
+cmd_list() {
+  ensure_lima
+
+  local active_ver
+  active_ver="$(current_active_version)"
+
+  printf "  %-45s %s\n" "TAG" "VERSION"
+  printf "  %-45s %s\n" "---" "-------"
+
+  # Show active first
+  if lima nerdctl image inspect "${IMAGE_NAME}:active" &>/dev/null; then
+    printf "  %-45s %s  <-- active\n" "${IMAGE_NAME}:active" "$active_ver"
+  fi
+
+  # Show prev if it exists
+  if lima nerdctl image inspect "${IMAGE_NAME}:prev" &>/dev/null; then
+    printf "  %-45s %s\n" "${IMAGE_NAME}:prev" "(previous)"
+  fi
+
+  # Show all versioned tags
+  local tags
+  tags="$(list_builds)" || true
+  if [[ -n "$tags" ]]; then
+    while IFS= read -r tag; do
+      local ver
+      ver="$(version_from_tag "$tag")"
+      printf "  %-45s %s\n" "$tag" "$ver"
+    done <<< "$tags"
+  fi
+}
+
+cmd_prune() {
+  local tags
+  tags="$(list_builds)" || true
+  [[ -z "$tags" ]] && return 0
+
+  local count=0
+  while IFS= read -r tag; do
+    count=$((count + 1))
+    if [[ $count -gt $KEEP_BUILDS ]]; then
+      log "Pruning old build: $tag"
+      lima nerdctl rmi "$tag" 2>/dev/null || true
+    fi
+  done <<< "$tags"
+}
+
+cmd_status() {
+  ensure_lima
+  local ver
+  ver="$(current_active_version)"
+  local latest
+  latest="$(latest_npm_version)"
+  log "Active version: $ver"
+  log "Latest on npm:  $latest"
+  if [[ "$ver" == "$latest" ]]; then
+    log "Up to date."
+  else
+    log "Update available. Run: pi-build bump"
+  fi
+}
+
+# --- main ---
+
+print_help() {
+  cat <<'EOF'
+pi-build - build and manage pi-coding-agent container images
+
+Usage:
+  pi-build bump [VERSION]     Build latest (or specified) version, swap to active
+  pi-build rollback [TAG]     Restore a previous build as active (default: prev)
+  pi-build list               Show available builds
+  pi-build status             Compare active version to latest on npm
+  pi-build prune              Remove old builds beyond retention limit
+  pi-build help               Show this help
+
+Environment:
+  FORCE=1  pi-build bump      Rebuild even if version matches current active
+
+Examples:
+  pi-build bump               Fetch & build latest version
+  pi-build bump 0.69.0        Build a specific version
+  pi-build rollback           Roll back to previous active
+  pi-build rollback v0.69.0-20260420T1800   Roll back to specific build
+EOF
+}
+
+case "${1:-help}" in
+  bump)     shift; cmd_bump "${1:-}" ;;
+  rollback) shift; cmd_rollback "${1:-}" ;;
+  list)     cmd_list ;;
+  status)   cmd_status ;;
+  prune)    cmd_prune ;;
+  help|-h|--help) print_help ;;
+  *) die "Unknown command: $1. Run 'pi-build help'." ;;
+esac
