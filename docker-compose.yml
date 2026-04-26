@@ -2,21 +2,22 @@ name: pi-agent
 
 x-pi-common: &pi-common
   image: pi-coding-agent:active
-  working_dir: /workspace
+  working_dir: /workspace/code
   stdin_open: true
   tty: true
   init: true
   environment:
     PI_CODING_AGENT_DIR: /home/node/.pi/agent
     # Set these in your shell or a local .env file (docker compose reads .env automatically)
+    TZ: ${TZ:-America/Chicago}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
   entrypoint: ["/bin/bash", "-lc"]
   # PI_ARGS lets you pass extra CLI flags, e.g.:
   # PI_ARGS="--model sonnet:high"
-  # Plans/reports mount at /working (pre-created in Dockerfile).
-  # Can't nest inside /workspace because the bind mount is read-only at init.
+  # Code mounts at /workspace/code, plans/reports at /workspace/~working.
+  # Dockerfile pre-creates the directory structure so mounts have targets.
   # Auto-discover extensions: find all index.ts files and build -e flags
   command:
     - "-lc"
@@ -27,11 +28,11 @@ services:
     <<: *pi-common
     profiles: ["full-dev"]
     volumes:
-      - ${WORKSPACE_DIR:-./}:/workspace
+      - ${WORKSPACE_DIR:-./}:/workspace/code
       - pi-agent-data:/home/node/.pi/agent
       - ${HOST_HOME}/.pi/agent/auth.json:/home/node/.pi/agent/auth.json:ro
-      - ${WORKING_DIR}/plans:/working/plans
-      - ${WORKING_DIR}/reports:/working/reports
+      - ${WORKING_DIR}/plans:/workspace/~working/plans
+      - ${WORKING_DIR}/reports:/workspace/~working/reports
       - ${HOST_PAC_DIR:-.}/extensions:/extensions:ro
     security_opt:
       - no-new-privileges:true
@@ -42,7 +43,7 @@ services:
     # Read-only mode for safer exploration/review sessions
     command:
     - "-lc"
-    - "EXT_FLAGS=$(find /extensions -name index.ts -maxdepth 2 2>/dev/null | sort | sed 's/^/-e /' | tr '\\n' ' '); pi $EXT_FLAGS --tools read,grep,find,ls ${PI_ARGS:-}"
+    - "EXT_FLAGS=$$(find /extensions -name index.ts -maxdepth 2 2>/dev/null | sort | sed 's/^/-e /' | tr '\\n' ' '); pi $$EXT_FLAGS --tools read,grep,find,ls ${PI_ARGS:-}"
     read_only: true
     cap_drop:
       - ALL
@@ -53,11 +54,11 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     volumes:
-      - ${WORKSPACE_DIR:-./}:/workspace:ro
+      - ${WORKSPACE_DIR:-./}:/workspace/code:ro
       - pi-agent-data:/home/node/.pi/agent
       - ${HOST_HOME}/.pi/agent/auth.json:/home/node/.pi/agent/auth.json:ro
-      - ${WORKING_DIR}/plans:/working/plans:ro
-      - ${WORKING_DIR}/reports:/working/reports:ro
+      - ${WORKING_DIR}/plans:/workspace/~working/plans:ro
+      - ${WORKING_DIR}/reports:/workspace/~working/reports:ro
       - ${HOST_PAC_DIR:-.}/extensions:/extensions:ro
 
 volumes:
