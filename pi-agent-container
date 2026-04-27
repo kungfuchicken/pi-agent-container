@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 IMAGE_NAME="pi-coding-agent"
 
 print_help() {
   cat <<'EOF'
-pi-agent-container - run pi inside Docker via the pi-agent-container compose app
+pi-agent-container - run pi inside a polyglot dev container
 
 Usage:
-  pi-agent-container [dev|safe] [--workspace PATH] [-- PI_ARGS...]
+  pi-agent-container [dev|safe] [--workspace PATH] [-v] [-- PI_ARGS...]
   pi-agent-container bump [VERSION]    Build latest (or specified) pi-coding-agent image
   pi-agent-container rollback [TAG]    Restore a previous build as active
   pi-agent-container list              Show available builds
@@ -22,7 +21,8 @@ Modes:
   safe  Read-only mode (read/grep/find/ls only).
 
 Options:
-  --workspace PATH   Host path mounted at /workspace (default: current directory)
+  --workspace PATH   Host path mounted at /workspace/<relpath> (default: current directory)
+  -v, --verbose      Show resolved config and nerdctl command before running
   -h, --help         Show this help
 
 Examples:
@@ -37,6 +37,7 @@ EOF
 
 mode="dev"
 workspace="$PWD"
+verbose=false
 
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
   print_help
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
       workspace="$2"
       shift 2
       ;;
+    -v|--verbose)
+      verbose=true
+      shift
+      ;;
     --)
       shift
       break
@@ -78,21 +83,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-case "$mode" in
-  dev)
-    profile="full-dev"
-    service="pi-full-dev"
-    ;;
-  safe)
-    profile="safe"
-    service="pi-safe"
-    ;;
-  *)
-    echo "error: mode must be 'dev' or 'safe'" >&2
-    exit 1
-    ;;
-esac
 
 # Remaining args are forwarded to pi as PI_ARGS.
 pi_args="$*"
@@ -111,11 +101,152 @@ if ! lima nerdctl image inspect "${IMAGE_NAME}:active" &>/dev/null; then
   exit 1
 fi
 
-cd "$APP_DIR"
+# --- Derive paths ---
 
-# Write HOST_HOME to .env so compose can read it. Lima doesn't forward arbitrary
-# env vars into the VM, but compose auto-reads .env from the working directory.
-# HOST_HOME is needed because $HOME inside Lima resolves to the Linux home.
-printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nHOST_PAC_DIR=%s\nPI_ARGS=%s\n' "$HOME" "$workspace" "${WORKING_DIR:-$APP_DIR/../..}" "$APP_DIR" "$pi_args" > .env
+# WORKING_DIR: host path to ~working/.
+# Default: find ~working/ by locating it in the script's path.
+# Works from both the main repo and git worktrees nested beneath it.
+if [[ -z "${WORKING_DIR:-}" ]]; then
+  if [[ "$APP_DIR" == *"/~working/"* ]]; then
+    working_dir="${APP_DIR%%/~working/*}/~working"
+  else
+    working_dir="$(cd "$APP_DIR/../.." && pwd)"
+  fi
+else
+  working_dir="$WORKING_DIR"
+fi
 
-lima nerdctl compose --profile "$profile" run --rm "$service"
+# WORKSPACE_ROOT: parent of ~working/.
+workspace_root="$(cd "$working_dir/.." && pwd)"
+
+# WORKSPACE_RELPATH: active repo relative to workspace root.
+workspace_relpath="${workspace#"$workspace_root"/}"
+if [[ "$workspace_relpath" == "$workspace" ]]; then
+  echo "error: workspace '$workspace' is not inside WORKSPACE_ROOT '$workspace_root'" >&2
+  exit 1
+fi
+
+# PAC_DIR: where extensions, skills, and agents live inside the container.
+pac_dir="/workspace/~working/apps/pi-agent-container"
+
+# GIT_CONFIG_GLOBAL: resolve symlinked gitconfig into the workspace mount.
+git_config_global=""
+if [[ -L "$HOME/.gitconfig" ]]; then
+  gitconfig_target="$(readlink -f "$HOME/.gitconfig")"
+  gitconfig_relpath="${gitconfig_target#"$workspace_root"/}"
+  if [[ "$gitconfig_relpath" != "$gitconfig_target" ]]; then
+    git_config_global="/workspace/$gitconfig_relpath"
+  fi
+elif [[ -f "$HOME/.gitconfig" ]]; then
+  echo "warning: ~/.gitconfig is not a symlink into WORKSPACE_ROOT." >&2
+  echo "  git config will use defaults inside the container." >&2
+  echo "  To fix: symlink ~/.gitconfig into your workspace, or set GIT_CONFIG_GLOBAL." >&2
+fi
+
+# Container name: unique per session for concurrent runs.
+container_name="pac-$(basename "$workspace" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')-$(date -u +%H%M%S)"
+
+# --- Build nerdctl run command ---
+
+# Extension auto-discovery: find all index.ts and build -e flags.
+# This runs inside the container as the entrypoint command.
+pi_command="EXT_FLAGS=\$(find $pac_dir/extensions -name index.ts -maxdepth 2 2>/dev/null | sort | sed 's/^/-e /' | tr '\n' ' '); pi \$EXT_FLAGS ${pi_args}"
+
+run_args=(
+  --rm
+  --name "$container_name"
+  --init
+  -it
+  -w "/workspace/$workspace_relpath"
+
+  # Environment
+  -e "PI_CODING_AGENT_DIR=/home/pac/.pi/agent"
+  -e "PAC_DIR=$pac_dir"
+  -e "TZ=${TZ:-America/Chicago}"
+  -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
+  -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}"
+  -e "GOOGLE_API_KEY=${GOOGLE_API_KEY:-}"
+)
+
+[[ -n "$git_config_global" ]] && run_args+=(-e "GIT_CONFIG_GLOBAL=$git_config_global")
+
+# Volumes — shared between dev and safe (mode controls :ro)
+run_args+=(
+  # Workspace (ro base + rw overlays for writable paths)
+  -v "$workspace_root:/workspace:ro"
+  -v "$workspace:/workspace/$workspace_relpath"
+  -v "$working_dir/plans:/workspace/~working/plans"
+  -v "$working_dir/reports:/workspace/~working/reports"
+
+  # Agent and tool state
+  -v "$HOME/.pi:/home/pac/.pi"
+  -v "$HOME/.claude:/home/pac/.claude"
+  -v "$HOME/.config/gh:/home/pac/.config/gh"
+  -v "$HOME/.ssh:/home/pac/.ssh:ro"
+
+  # Caches
+  -v "$HOME/.cache/uv:/home/pac/.cache/uv"
+  -v "$HOME/.cargo/registry:/home/pac/.cargo/registry"
+)
+
+if [[ "$mode" == "safe" ]]; then
+  # Override writable mounts to ro; add safe-mode restrictions
+  pi_command="EXT_FLAGS=\$(find $pac_dir/extensions -name index.ts -maxdepth 2 2>/dev/null | sort | sed 's/^/-e /' | tr '\n' ' '); pi \$EXT_FLAGS --tools read,grep,find,ls ${pi_args}"
+
+  run_args=(
+    --rm
+    --name "$container_name"
+    --init
+    -it
+    -w "/workspace/$workspace_relpath"
+    --read-only
+    --cap-drop ALL
+    --pids-limit 512
+    --memory 4g
+    --tmpfs /tmp:size=256m,mode=1777
+
+    # Environment
+    -e "PI_CODING_AGENT_DIR=/home/pac/.pi/agent"
+    -e "PAC_DIR=$pac_dir"
+    -e "TZ=${TZ:-America/Chicago}"
+    -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
+    -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}"
+    -e "GOOGLE_API_KEY=${GOOGLE_API_KEY:-}"
+
+    # Everything ro in safe mode
+    -v "$workspace_root:/workspace:ro"
+    -v "$HOME/.pi:/home/pac/.pi:ro"
+    -v "$HOME/.claude:/home/pac/.claude:ro"
+    -v "$HOME/.config/gh:/home/pac/.config/gh:ro"
+    -v "$HOME/.ssh:/home/pac/.ssh:ro"
+    -v "$HOME/.cache/uv:/home/pac/.cache/uv:ro"
+    -v "$HOME/.cargo/registry:/home/pac/.cargo/registry:ro"
+  )
+
+  [[ -n "$git_config_global" ]] && run_args+=(-e "GIT_CONFIG_GLOBAL=$git_config_global")
+fi
+
+run_args+=(
+  --security-opt no-new-privileges
+  "${IMAGE_NAME}:active"
+  -lc "$pi_command"
+)
+
+if $verbose; then
+  echo "--- pac verbose ---"
+  echo "APP_DIR:           $APP_DIR"
+  echo "WORKSPACE_ROOT:    $workspace_root"
+  echo "WORKSPACE_DIR:     $workspace"
+  echo "WORKSPACE_RELPATH: $workspace_relpath"
+  echo "WORKING_DIR:       $working_dir"
+  echo "GIT_CONFIG_GLOBAL: ${git_config_global:-(not resolved)}"
+  echo "PAC_DIR:           $pac_dir"
+  echo "CONTAINER:         $container_name"
+  echo "MODE:              $mode"
+  echo "IMAGE:             ${IMAGE_NAME}:active"
+  echo ""
+  echo "Command: lima nerdctl run ${run_args[*]}"
+  echo "---"
+fi
+
+exec lima nerdctl run "${run_args[@]}"

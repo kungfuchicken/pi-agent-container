@@ -12,10 +12,19 @@ HOST_HOME ?= $(HOME)
 # Default assumes this repo lives at ~working/apps/pi-agent-container/.
 WORKING_DIR ?= $(abspath ../..)
 
+# WORKSPACE_ROOT: parent of ~working/ — holds workspace-level context files.
+WORKSPACE_ROOT ?= $(abspath $(WORKING_DIR)/..)
+
+# WORKSPACE_RELPATH: path of active repo relative to WORKSPACE_ROOT.
+# Default: the workspace root itself (empty means cwd = /workspace/).
+WORKSPACE_RELPATH ?= $(subst $(WORKSPACE_ROOT)/,,$(WORKSPACE_DIR))
+
 export WORKSPACE_DIR
 export PI_ARGS
 export HOST_HOME
 export WORKING_DIR
+export WORKSPACE_ROOT
+export WORKSPACE_RELPATH
 
 PLIST_TEMPLATE := com.pi-build.plist.template
 PLIST_GENERATED := com.pi-build.plist
@@ -48,17 +57,11 @@ help:
 	@echo "  WORKSPACE_DIR=/path/to/project"
 	@echo "  PI_ARGS='--model sonnet:high'"
 
-# Write .env before compose — lima doesn't forward env vars into the VM.
-.env: FORCE
-	@printf 'HOST_HOME=%s\nWORKSPACE_DIR=%s\nWORKING_DIR=%s\nHOST_PAC_DIR=%s\nPI_ARGS=%s\n' "$(HOST_HOME)" "$(WORKSPACE_DIR)" "$(WORKING_DIR)" "$(abspath .)" "$(PI_ARGS)" > .env
+dev:
+	./pi-agent-container dev --workspace "$(WORKSPACE_DIR)" -- $(PI_ARGS)
 
-dev: .env
-	lima nerdctl compose --profile full-dev run --rm pi-full-dev
-
-safe: .env
-	lima nerdctl compose --profile safe run --rm pi-safe
-
-FORCE:
+safe:
+	./pi-agent-container safe --workspace "$(WORKSPACE_DIR)" -- $(PI_ARGS)
 
 bump:
 	./pi-build bump
@@ -92,6 +95,8 @@ $(PLIST_GENERATED): $(PLIST_TEMPLATE)
 
 config:
 	@echo "WORKSPACE_DIR=$(WORKSPACE_DIR)"
-	@echo "PI_ARGS=$(PI_ARGS)"
-	@echo "HOST_HOME=$(HOST_HOME)"
+	@echo "WORKSPACE_ROOT=$(WORKSPACE_ROOT)"
+	@echo "WORKSPACE_RELPATH=$(WORKSPACE_RELPATH)"
 	@echo "WORKING_DIR=$(WORKING_DIR)"
+	@echo "HOST_HOME=$(HOST_HOME)"
+	@echo "PI_ARGS=$(PI_ARGS)"
