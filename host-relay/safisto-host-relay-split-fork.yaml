@@ -1,0 +1,12 @@
+watch:
+  - ~/.pi/host-relay
+
+rules:
+  - name: ghostty-split
+    match:
+      glob: "split-*.json"
+    actions:
+      - run:
+          command: ~/.pi/ghostty-split.sh
+          args: ["{{path}}"]
+      - delete:

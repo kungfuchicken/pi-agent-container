@@ -91,19 +91,64 @@ async function createForkedSession(ctx: ExtensionCommandContext): Promise<string
 	return newSessionFile;
 }
 
+function getHostRelayDir(): string {
+	const fromEnv = process.env.PAC_HOST_RELAY_DIR?.trim();
+	if (fromEnv && fromEnv.length > 0) {
+		return fromEnv;
+	}
+	return path.join(process.env.HOME ?? "/home/pac", ".pi", "host-relay");
+}
+
+function enqueueSplitRequest(cwd: string, input: string, forkedSessionFile?: string): string {
+	const relayDir = getHostRelayDir();
+	const timestamp = new Date().toISOString();
+	const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+	const requestPath = path.join(relayDir, `split-${fileTimestamp}-${randomUUID()}.json`);
+
+	const payload = {
+		action: "split",
+		cwd,
+		input,
+		timestamp,
+		forkedSessionFile,
+	};
+
+	void fs
+		.mkdir(relayDir, { recursive: true })
+		.then(() => fs.writeFile(requestPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8"))
+		.catch(() => undefined);
+
+	return requestPath;
+}
+
+function notifyForkResult(ctx: ExtensionCommandContext, forkedSessionFile: string | undefined, prompt: string, wasBusy: boolean): void {
+	if (forkedSessionFile) {
+		const fileName = path.basename(forkedSessionFile);
+		const suffix = prompt ? " and sent prompt" : "";
+		ctx.ui.notify(`Forked to ${fileName} in a new Ghostty split${suffix}.`, "info");
+		if (wasBusy) {
+			ctx.ui.notify("Forked from current committed state (in-flight turn continues in original session).", "info");
+		}
+	} else {
+		ctx.ui.notify("Opened a new Ghostty split (no persisted session to fork).", "warning");
+	}
+}
+
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("split-fork", {
 		description: "Fork this session into a new pi process in a right-hand Ghostty split. Usage: /split-fork [optional prompt]",
 		handler: async (args, ctx) => {
-			if (process.platform !== "darwin") {
-				ctx.ui.notify("/split-fork currently requires macOS (Ghostty AppleScript).", "warning");
-				return;
-			}
-
 			const wasBusy = !ctx.isIdle();
 			const prompt = args.trim();
 			const forkedSessionFile = await createForkedSession(ctx);
 			const startupInput = buildPiStartupInput(forkedSessionFile, prompt);
+
+			if (process.platform !== "darwin") {
+				const requestPath = enqueueSplitRequest(ctx.cwd, startupInput, forkedSessionFile);
+				ctx.ui.notify(`Queued host relay split request: ${path.basename(requestPath)}`, "info");
+				notifyForkResult(ctx, forkedSessionFile, prompt, wasBusy);
+				return;
+			}
 
 			const result = await pi.exec("osascript", ["-e", GHOSTTY_SPLIT_SCRIPT, "--", ctx.cwd, startupInput]);
 			if (result.code !== 0) {
@@ -115,16 +160,7 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 
-			if (forkedSessionFile) {
-				const fileName = path.basename(forkedSessionFile);
-				const suffix = prompt ? " and sent prompt" : "";
-				ctx.ui.notify(`Forked to ${fileName} in a new Ghostty split${suffix}.`, "info");
-				if (wasBusy) {
-					ctx.ui.notify("Forked from current committed state (in-flight turn continues in original session).", "info");
-				}
-			} else {
-				ctx.ui.notify("Opened a new Ghostty split (no persisted session to fork).", "warning");
-			}
+			notifyForkResult(ctx, forkedSessionFile, prompt, wasBusy);
 		},
 	});
 }

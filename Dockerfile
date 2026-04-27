@@ -15,6 +15,7 @@ ARG ESLINT_VERSION=10.2.1
 ARG PRETTIER_VERSION=3.8.3
 ARG TYPESCRIPT_VERSION=6.0.3
 ARG VITEST_VERSION=4.1.5
+ARG ZOLA_VERSION=0.21.0
 
 # Minimal deps for downloading and building
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -66,6 +67,17 @@ RUN npm install -g \
     "vitest@${VITEST_VERSION}" \
     && npm cache clean --force
 
+# Zola — direct release tarball, architecture-aware (pinned)
+RUN ARCH=$(uname -m) \
+    && case "$ARCH" in \
+         x86_64)  ZOLA_ARCH=x86_64-unknown-linux-gnu  ;; \
+         aarch64) ZOLA_ARCH=aarch64-unknown-linux-gnu ;; \
+         *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-${ZOLA_ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin zola \
+    && chmod +x /usr/local/bin/zola
+
 
 # ============================================================
 # Stage 2: runtime — clean image with all tools
@@ -110,6 +122,9 @@ COPY --from=builder /usr/local/bin/node /usr/local/bin/
 COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# Zola
+COPY --from=builder /usr/local/bin/zola /usr/local/bin/
 
 # Rust
 ENV RUSTUP_HOME=/usr/local/rustup \

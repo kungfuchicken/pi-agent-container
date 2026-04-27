@@ -36,7 +36,7 @@ Node.js LTS installed from a direct tarball (not the `node` base image). Global 
 
 ### Dev Utilities
 
-`git`, `gh`, `curl`, `wget`, `jq`, `openssh-client`, `ripgrep` (rg), `fd-find` (symlinked to `fd`).
+`git`, `gh`, `curl`, `wget`, `jq`, `openssh-client`, `ripgrep` (rg), `fd-find` (symlinked to `fd`), `zola`.
 
 ## Quick Start
 
@@ -277,6 +277,20 @@ rules:
       - delete:
 ```
 
+For the current split-fork integration in this repo, use the provided host assets:
+
+- `host-relay/ghostty-split.sh` (contains the Ghostty AppleScript runner)
+- `host-relay/safisto-host-relay-split-fork.yaml` (Safisto rule focused on `split-*.json`)
+
+Install on the host:
+
+```bash
+mkdir -p ~/.pi/host-relay
+install -m 755 host-relay/ghostty-split.sh ~/.pi/ghostty-split.sh
+cp host-relay/safisto-host-relay-split-fork.yaml ~/.pi/safisto-host-relay-split-fork.yaml
+safisto --config ~/.pi/safisto-host-relay-split-fork.yaml
+```
+
 Each handler script reads the JSON, extracts the fields, and calls the macOS API. This pattern is extensible — new host interactions are a new rule and a small script.
 
 ## How It Works
@@ -284,7 +298,7 @@ Each handler script reads the JSON, extracts the fields, and calls the macOS API
 ### Image Tagging
 
 ```
-pi-coding-agent:active                    <-- compose always uses this
+pi-coding-agent:active                    <-- pi-agent-container runs this tag
 pi-coding-agent:prev                      <-- previous active (quick rollback)
 pi-coding-agent:v0.70.2-20260424T2100     <-- immutable versioned builds
 ```
@@ -297,7 +311,7 @@ The `active` tag only moves after a successful build. If the build fails, the ex
 
 ### Environment Variables
 
-Set these in your shell or in a `.env` file alongside `docker-compose.yml`:
+Set these in your shell before running `pi-agent-container`:
 
 | Variable             | Purpose                                                              |
 | -------------------- | -------------------------------------------------------------------- |
@@ -314,25 +328,24 @@ Set these in your shell or in a `.env` file alongside `docker-compose.yml`:
 
 This setup uses `lima nerdctl` rather than Docker. A few things to note:
 
-- Environment variables from the macOS host are not automatically forwarded into the Lima VM. The `pi-agent-container` script and Makefile write a `.env` file that compose reads.
-- The `HOST_HOME` variable bridges the macOS `$HOME` path into compose, since `$HOME` inside Lima resolves to the Linux home directory.
+- Environment variables from the macOS host are not automatically forwarded into the Lima VM. The `pi-agent-container` wrapper forwards the ones pi needs as explicit `-e` flags.
+- `HOME` inside Lima is the Linux VM home, so host paths should be resolved on macOS before invoking `pi-agent-container`.
 - The `pi-build` script includes an `ensure_lima()` function that starts the Lima VM if it isn't running (useful for the scheduled Friday build).
 
 ## File Overview
 
 | File                          | Purpose                                                                          |
 | ----------------------------- | -------------------------------------------------------------------------------- |
-| `pi-agent-container`          | CLI wrapper for running pi (symlink to `~/.local/bin/`)                          |
+| `pi-agent-container`          | CLI wrapper for running pi with `dev`/`safe` modes via `lima nerdctl run`       |
 | `pi-build`                    | CLI for building, rolling back, and managing images (symlink to `~/.local/bin/`) |
-| `docker-compose.yml`          | Compose config with `dev` and `safe` profiles                                    |
-| `Dockerfile`                  | Multi-stage build with all pinned toolchains + pi-coding-agent                   |
+| `Dockerfile`                  | Multi-stage build with all pinned toolchains + pi-coding-agent                  |
 | `Makefile`                    | Developer API wrapping all common tasks                                          |
 | `com.pi-build.plist.template` | Launchd template for weekly scheduled builds                                     |
-| `.pi-version`                 | Tracks the active pi-coding-agent version (generated, gitignored)                |
-| `.env`                        | Compose environment bridge for Lima (generated, gitignored)                      |
-| `skills/`                     | Claude Code skills for planning, review, and workflow                            |
-| `skills/_shared/`             | Shared support files referenced by multiple skills                               |
-| `extensions/`                 | Pi extensions vendored as source                                                 |
+| `.pi-version`                 | Tracks the active pi-coding-agent version (generated, gitignored)               |
+| `.env`                        | Optional local env file for your shell workflow (gitignored)                    |
+| `skills/`                     | Claude Code skills for planning, review, and workflow                           |
+| `skills/_shared/`             | Shared support files referenced by multiple skills                              |
+| `extensions/`                 | Pi extensions vendored as source                                                |
 
 ## License
 

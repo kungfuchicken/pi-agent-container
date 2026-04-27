@@ -11,6 +11,7 @@ pi-agent-container - run pi inside a polyglot dev container
 
 Usage:
   pi-agent-container [dev|safe] [--workspace PATH] [-v] [-- PI_ARGS...]
+  pi-agent-container doctor [--workspace PATH] [-v]   Diagnose mounts + skill visibility
   pi-agent-container bump [VERSION]    Build latest (or specified) pi-coding-agent image
   pi-agent-container rollback [TAG]    Restore a previous build as active
   pi-agent-container list              Show available builds
@@ -28,6 +29,8 @@ Options:
 Examples:
   pi-agent-container
   pi-agent-container safe
+  pi-agent-container doctor
+  pi-agent-container doctor --workspace ~/code/my-project -v
   pi-agent-container dev --workspace ~/code/my-project
   pi-agent-container dev -- --model sonnet:high
   pi-agent-container bump
@@ -38,6 +41,7 @@ EOF
 mode="dev"
 workspace="$PWD"
 verbose=false
+doctor=false
 
 if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
   print_help
@@ -49,9 +53,13 @@ case "${1:-}" in
   bump|rollback|list|status|prune)
     exec "$APP_DIR/pi-build" "$@"
     ;;
+  doctor)
+    doctor=true
+    shift
+    ;;
 esac
 
-if [[ ${1:-} == "dev" || ${1:-} == "safe" ]]; then
+if [[ "$doctor" == false && ( ${1:-} == "dev" || ${1:-} == "safe" ) ]]; then
   mode="$1"
   shift
 fi
@@ -85,6 +93,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Remaining args are forwarded to pi as PI_ARGS.
+if [[ "$doctor" == true && $# -gt 0 ]]; then
+  echo "error: unknown doctor arguments: $*" >&2
+  echo "usage: pi-agent-container doctor [--workspace PATH] [-v]" >&2
+  exit 1
+fi
 pi_args="$*"
 
 # Resolve workspace to absolute path for consistency.
@@ -116,14 +129,59 @@ else
   working_dir="$WORKING_DIR"
 fi
 
-# WORKSPACE_ROOT: parent of ~working/.
-workspace_root="$(cd "$working_dir/.." && pwd)"
+# WORKSPACE_ROOT: parent of ~working/ (override with WORKSPACE_ROOT if needed).
+if [[ -n "${WORKSPACE_ROOT:-}" ]]; then
+  workspace_root="$(cd "$WORKSPACE_ROOT" && pwd)"
+else
+  workspace_root="$(cd "$working_dir/.." && pwd)"
+fi
 
-# WORKSPACE_RELPATH: active repo relative to workspace root.
-workspace_relpath="${workspace#"$workspace_root"/}"
-if [[ "$workspace_relpath" == "$workspace" ]]; then
-  echo "error: workspace '$workspace' is not inside WORKSPACE_ROOT '$workspace_root'" >&2
-  exit 1
+# Map workspace path inside container.
+# If workspace is under WORKSPACE_ROOT, keep it under /workspace/<relpath>.
+# Otherwise mount an external root and preserve relative path so parent folders
+# (for example ../.claude/skills) stay visible from the repo.
+workspace_relpath=""
+workspace_inside_root=false
+external_root=""
+external_relpath=""
+if [[ "$workspace" == "$workspace_root" ]]; then
+  workspace_inside_root=true
+elif [[ "$workspace" == "$workspace_root/"* ]]; then
+  workspace_relpath="${workspace#"$workspace_root"/}"
+  workspace_inside_root=true
+fi
+
+if [[ "$workspace_inside_root" == true ]]; then
+  container_workspace="/workspace${workspace_relpath:+/$workspace_relpath}"
+else
+  if [[ -n "${PAC_EXTERNAL_ROOT:-}" ]]; then
+    external_root="$(cd "$PAC_EXTERNAL_ROOT" && pwd)"
+  else
+    # Prefer an ancestor above the repo that looks like a project-area root.
+    probe="$(dirname "$workspace")"
+    while [[ "$probe" != "/" ]]; do
+      if [[ -d "$probe/.claude/skills" || -d "$probe/.agents/skills" || -f "$probe/.pi/settings.json" ]]; then
+        external_root="$probe"
+        break
+      fi
+      probe="$(dirname "$probe")"
+    done
+
+    if [[ -z "$external_root" ]]; then
+      external_root="$(dirname "$workspace")"
+    fi
+  fi
+
+  if [[ "$workspace" == "$external_root" ]]; then
+    external_relpath=""
+  elif [[ "$workspace" == "$external_root/"* ]]; then
+    external_relpath="${workspace#"$external_root"/}"
+  else
+    echo "error: workspace '$workspace' is not inside PAC_EXTERNAL_ROOT/external root '$external_root'" >&2
+    exit 1
+  fi
+
+  container_workspace="/workspace-external${external_relpath:+/$external_relpath}"
 fi
 
 # PAC_DIR: where extensions, skills, and agents live inside the container.
@@ -157,7 +215,7 @@ run_args=(
   --name "$container_name"
   --init
   -it
-  -w "/workspace/$workspace_relpath"
+  -w "$container_workspace"
 
   # Environment
   -e "PI_CODING_AGENT_DIR=/home/pac/.pi/agent"
@@ -174,13 +232,33 @@ run_args=(
 run_args+=(
   # Workspace (ro base + rw overlays for writable paths)
   -v "$workspace_root:/workspace:ro"
-  -v "$workspace:/workspace/$workspace_relpath"
+)
+
+if [[ "$workspace_inside_root" == true ]]; then
+  run_args+=(-v "$workspace:$container_workspace")
+else
+  # Mount external root read-only for ancestor discovery (skills/context),
+  # then overlay writable mounts where pi needs lock/state files.
+  run_args+=(
+    -v "$external_root:/workspace-external:ro"
+    -v "$workspace:$container_workspace"
+  )
+
+  external_pi_dir="$external_root/.pi"
+  mkdir -p "$external_pi_dir"
+  run_args+=(-v "$external_pi_dir:/workspace-external/.pi")
+fi
+
+mkdir -p "$HOME/.agents"
+
+run_args+=(
   -v "$working_dir/plans:/workspace/~working/plans"
   -v "$working_dir/reports:/workspace/~working/reports"
 
   # Agent and tool state
   -v "$HOME/.pi:/home/pac/.pi"
   -v "$HOME/.claude:/home/pac/.claude"
+  -v "$HOME/.agents:/home/pac/.agents"
   -v "$HOME/.config/gh:/home/pac/.config/gh"
   -v "$HOME/.ssh:/home/pac/.ssh:ro"
 
@@ -198,7 +276,7 @@ if [[ "$mode" == "safe" ]]; then
     --name "$container_name"
     --init
     -it
-    -w "/workspace/$workspace_relpath"
+    -w "$container_workspace"
     --read-only
     --cap-drop ALL
     --pids-limit 512
@@ -215,8 +293,25 @@ if [[ "$mode" == "safe" ]]; then
 
     # Everything ro in safe mode
     -v "$workspace_root:/workspace:ro"
+  )
+
+  if [[ "$workspace_inside_root" == true ]]; then
+    run_args+=(-v "$workspace:$container_workspace:ro")
+  else
+    run_args+=(
+      -v "$external_root:/workspace-external:ro"
+      -v "$workspace:$container_workspace:ro"
+    )
+
+    external_pi_dir="$external_root/.pi"
+    mkdir -p "$external_pi_dir"
+    run_args+=(-v "$external_pi_dir:/workspace-external/.pi:ro")
+  fi
+
+  run_args+=(
     -v "$HOME/.pi:/home/pac/.pi:ro"
     -v "$HOME/.claude:/home/pac/.claude:ro"
+    -v "$HOME/.agents:/home/pac/.agents:ro"
     -v "$HOME/.config/gh:/home/pac/.config/gh:ro"
     -v "$HOME/.ssh:/home/pac/.ssh:ro"
     -v "$HOME/.cache/uv:/home/pac/.cache/uv:ro"
@@ -232,12 +327,205 @@ run_args+=(
   -lc "$pi_command"
 )
 
+if [[ "$doctor" == true ]]; then
+  doctor_command="$(cat <<'EOF'
+set -euo pipefail
+
+echo "--- pac doctor (container) ---"
+echo "PWD: $(pwd)"
+echo ""
+
+echo "[skill roots]"
+roots=(
+  /home/pac/.claude/skills
+  /home/pac/.agents/skills
+  "$(pwd)/.claude/skills"
+  "$(pwd)/.agents/skills"
+  /workspace/.claude/skills
+  /workspace/.agents/skills
+  /workspace-external/.claude/skills
+  /workspace-external/.agents/skills
+)
+for d in "${roots[@]}"; do
+  if [[ -d "$d" ]]; then
+    echo "  ok  $d"
+  else
+    echo "  --  $d (missing)"
+  fi
+done
+
+echo ""
+echo "[SKILL.md files]"
+found=0
+for d in "${roots[@]}"; do
+  if [[ -d "$d" ]]; then
+    while IFS= read -r f; do
+      echo "  $f"
+      found=1
+    done < <(find "$d" -maxdepth 2 -type f -name SKILL.md 2>/dev/null | sort)
+  fi
+done
+if [[ "$found" -eq 0 ]]; then
+  echo "  (none found)"
+fi
+
+echo ""
+echo "[symlink health]"
+for d in \
+  /home/pac/.claude/skills \
+  /home/pac/.agents/skills \
+  "$(pwd)/.claude/skills" \
+  "$(pwd)/.agents/skills" \
+  /workspace/.claude/skills \
+  /workspace/.agents/skills \
+  /workspace-external/.claude/skills \
+  /workspace-external/.agents/skills; do
+  [[ -d "$d" ]] || continue
+  while IFS= read -r l; do
+    target="$(readlink "$l" || true)"
+    if [[ -e "$l" ]]; then
+      echo "  ok      $l -> $target"
+    else
+      echo "  BROKEN  $l -> $target"
+    fi
+  done < <(find "$d" -maxdepth 1 -mindepth 1 -type l 2>/dev/null | sort)
+done
+
+echo ""
+echo "[settings candidates]"
+settings=(
+  "$(pwd)/.pi/settings.json"
+  /workspace/.pi/settings.json
+  /workspace-external/.pi/settings.json
+  /home/pac/.pi/settings.json
+)
+for f in "${settings[@]}"; do
+  if [[ -f "$f" ]]; then
+    echo "  ok  $f"
+    node - "$f" <<'JS'
+const fs = require('fs');
+const path = require('path');
+
+const settingsPath = process.argv[2];
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+} catch (e) {
+  console.log(`    ! unable to parse JSON: ${e.message}`);
+  process.exit(0);
+}
+
+const skills = data.skills;
+if (!Array.isArray(skills)) {
+  console.log('    skills: (missing or not a list)');
+  process.exit(0);
+}
+
+if (skills.length === 0) {
+  console.log('    skills: []');
+  process.exit(0);
+}
+
+console.log('    skills:');
+for (const s of skills) {
+  if (typeof s !== 'string') {
+    console.log(`      - ${JSON.stringify(s)} (non-string)`);
+    continue;
+  }
+  const md = s.endsWith('SKILL.md') ? s : path.join(s, 'SKILL.md');
+  const exists = fs.existsSync(md) && fs.statSync(md).isFile();
+  console.log(`      - ${s} -> ${exists ? 'ok' : 'missing'} (${md})`);
+}
+JS
+  else
+    echo "  --  $f (missing)"
+  fi
+done
+EOF
+)"
+
+  doctor_args=(
+    --rm
+    --name "$container_name"
+    --init
+    -it
+    -w "$container_workspace"
+    -e "PI_CODING_AGENT_DIR=/home/pac/.pi/agent"
+    -e "PAC_DIR=$pac_dir"
+    -e "TZ=${TZ:-America/Chicago}"
+    -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
+    -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}"
+    -e "GOOGLE_API_KEY=${GOOGLE_API_KEY:-}"
+  )
+
+  [[ -n "$git_config_global" ]] && doctor_args+=(-e "GIT_CONFIG_GLOBAL=$git_config_global")
+
+  doctor_args+=(
+    -v "$workspace_root:/workspace:ro"
+  )
+
+  if [[ "$workspace_inside_root" == true ]]; then
+    doctor_args+=(-v "$workspace:$container_workspace")
+  else
+    doctor_args+=(
+      -v "$external_root:/workspace-external:ro"
+      -v "$workspace:$container_workspace"
+    )
+
+    external_pi_dir="$external_root/.pi"
+    mkdir -p "$external_pi_dir"
+    doctor_args+=(-v "$external_pi_dir:/workspace-external/.pi")
+  fi
+
+  mkdir -p "$HOME/.agents"
+
+  doctor_args+=(
+    -v "$working_dir/plans:/workspace/~working/plans"
+    -v "$working_dir/reports:/workspace/~working/reports"
+    -v "$HOME/.pi:/home/pac/.pi"
+    -v "$HOME/.claude:/home/pac/.claude"
+    -v "$HOME/.agents:/home/pac/.agents"
+    -v "$HOME/.config/gh:/home/pac/.config/gh"
+    -v "$HOME/.ssh:/home/pac/.ssh:ro"
+    -v "$HOME/.cache/uv:/home/pac/.cache/uv"
+    -v "$HOME/.cargo/registry:/home/pac/.cargo/registry"
+    --security-opt no-new-privileges
+    "${IMAGE_NAME}:active"
+    -lc "$doctor_command"
+  )
+
+  echo "--- pac doctor ---"
+  echo "APP_DIR:           $APP_DIR"
+  echo "WORKSPACE_ROOT:    $workspace_root"
+  echo "WORKSPACE_DIR:     $workspace"
+  echo "WORKSPACE_RELPATH: ${workspace_relpath:-(external workspace)}"
+  [[ "$workspace_inside_root" == false ]] && echo "EXTERNAL_ROOT:     $external_root"
+  echo "CONTAINER_CWD:     $container_workspace"
+  echo "PAC_EXTERNAL_ROOT: ${PAC_EXTERNAL_ROOT:-(unset)}"
+  echo "WORKING_DIR:       $working_dir"
+  echo "GIT_CONFIG_GLOBAL: ${git_config_global:-(not resolved)}"
+  echo "PAC_DIR:           $pac_dir"
+  echo "CONTAINER:         $container_name"
+  echo "MODE:              doctor"
+  echo "IMAGE:             ${IMAGE_NAME}:active"
+  if $verbose; then
+    echo ""
+    echo "Command: lima nerdctl run ${doctor_args[*]}"
+  fi
+  echo "---"
+
+  exec lima nerdctl run "${doctor_args[@]}"
+fi
+
 if $verbose; then
   echo "--- pac verbose ---"
   echo "APP_DIR:           $APP_DIR"
   echo "WORKSPACE_ROOT:    $workspace_root"
   echo "WORKSPACE_DIR:     $workspace"
-  echo "WORKSPACE_RELPATH: $workspace_relpath"
+  echo "WORKSPACE_RELPATH: ${workspace_relpath:-(external workspace)}"
+  [[ "$workspace_inside_root" == false ]] && echo "EXTERNAL_ROOT:     $external_root"
+  echo "CONTAINER_CWD:     $container_workspace"
+  echo "PAC_EXTERNAL_ROOT: ${PAC_EXTERNAL_ROOT:-(unset)}"
   echo "WORKING_DIR:       $working_dir"
   echo "GIT_CONFIG_GLOBAL: ${git_config_global:-(not resolved)}"
   echo "PAC_DIR:           $pac_dir"

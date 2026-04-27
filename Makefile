@@ -4,8 +4,8 @@ SHELL := /bin/bash
 WORKSPACE_DIR ?= $(abspath ../..)
 PI_ARGS ?=
 
-# HOST_HOME passes the macOS $HOME into compose; $HOME inside Lima resolves
-# to the Linux home, breaking host bind mounts like auth.json.
+# HOST_HOME preserves the macOS $HOME path for local helper workflows.
+# $HOME inside Lima resolves to the Linux VM home.
 HOST_HOME ?= $(HOME)
 
 # WORKING_DIR: host path to ~working/ (plans and reports).
