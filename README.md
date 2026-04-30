@@ -174,13 +174,13 @@ The container mirrors your host workspace layout. The entire workspace root is m
 /workspace/                     <- bind: $WORKSPACE_ROOT (ro — entire workspace)
 ├── AGENTS.md, CLAUDE.md, ...   (visible from workspace root mount)
 ├── my-project/
-│   └── mirror/                 <- rw overlay (when this is the active repo + cwd)
+│   └── src/                    <- rw overlay (when this is the active repo + cwd)
 ├── ~working/
 │   ├── plans/                  <- rw overlay
 │   ├── reports/                <- rw overlay
 │   └── apps/
 │       └── pi-agent-container/ (visible from workspace root — extensions, skills, agents)
-├── dotfiles/                  (visible — GIT_CONFIG_GLOBAL points here)
+├── dotfiles/                   (visible — GIT_CONFIG_GLOBAL points here)
 └── ...
 ```
 
